@@ -1,0 +1,159 @@
+#! /bin/bash
+
+# Transform long options to short ones
+for arg in "$@"; do
+  shift
+  case "$arg" in
+    "--help") set -- "$@" "-h" ;;
+    "--remote-repository") set -- "$@" "-r" ;;
+    "--remote-branch") set -- "$@" "-B" ;;
+    "--target-directory") set -- "$@" "-d" ;;
+    "--no-update") set -- "$@" "-u" ;;
+    "--branch") set -- "$@" "-b" ;;
+    "--keep") set -- "$@" "-k" ;;
+    "--auto") set -- "$@" "-a" ;;
+    "--verbose") set -- "$@" "-v" ;;
+    "--dry-run") set -- "$@" "-n" ;;
+    *)        set -- "$@" "$arg"
+  esac
+done
+
+items=(remax)
+remote_name=remote
+remote_branch=master
+local_branch=master
+temp_tag=temp$RANDOM
+target_directory=""
+interactive=1
+keep=0
+quiet=1
+update=1
+git=$(which git)
+
+optstring="hr:b:B:kavnud:"
+function usage() {
+	echo "$( basename $0 ) [--help | -h] [--remote-repository|-r <remote-repository>]"
+	echo "     [--branch|-b <branch>] [--remote-branch|-B <remote-branch>] "
+	echo "     [--target-directory,-d <directory>]"
+	echo "     [--dry-run|-n] [-k] [--auto|-a] [--verbose|-v] [--no-update|-u]"
+	echo "     [--] item1 ..."
+	echo "Pulls from remote repository only selected changes."
+	echo "The changes are incorporated preserving history using rebase onto the local branch."
+	echo ""
+	echo "  --help,-h                     Print this help message and exit."
+	echo "  --remote-repository, -r       The remote repository. Defaults to '$remote_name'."
+	echo "  --remote-branch, -B           The remote branch. Defaults to '$remote_branch'."
+	echo "  --branch, -b                  The local branch. Defaults to '$local_branch'."
+	echo "  --auto,-a                     Do not enter interactive mode when rebasing."
+	echo "  --keep,-k                     Do not remove the temporary tag referring to the filtered remote repository."
+	echo "  --dry-run,-n                  Print the operations but do not perform any actions."
+	echo "  --target-directory,-d         If specified, copy all selected files into a subdir of the destination repository."
+	echo "  --no-update,-u                Do not update the local branch to point to the newly rebased commit."
+	echo "  --verbose,-v                  Allow verbose messages during filtering."
+}
+
+# Parse short options
+OPTIND=1
+while getopts $optstring opt
+do
+  case "$opt" in
+    "h") usage; exit 0 ;;
+    "r") remote_name=$OPTARG;;
+    "B") remote_branch=$OPTARG;;
+    "d") target_directory=$OPTARG;;
+    "b") branch=$OPTARG;;
+    "k") keep=1;;
+    "a") interactive=0;;
+    "v") quiet=0;;
+    "n") git=dump;;
+    "u") update=1;;
+    "?") usage >&2; exit 1 ;;
+  esac
+done
+shift $(($OPTIND-1)) # remove options from positional parameters
+
+
+function escape() {
+	args=()
+	for arg in "$@"; do
+		arg_safe="'$(echo "$arg" | sed -e "s/'/'\"'\"'/g")'"
+		args_safe=("${args_safe[@]}" "$arg_safe")
+	done
+	echo ${args_safe[*]}
+}
+
+function dump() {
+	echo git $(escape "$@")
+}
+
+items=("$@")
+for item in "${items[@]}"; do
+	item_safe=$(escape "$item")
+	items_safe=("${items_safe[@]}" "$item_safe")
+done
+
+if (( ${#items[@]} > 0 )) ; then 
+	filter="
+		git rm --cached -${quiet:+q}r . ;
+		git reset ${quiet:+-q} \$GIT_COMMIT -- ${items_safe[*]};
+	"
+else filter=""
+fi
+
+if ! [ -z "$target_directory" ] ; then 
+	safe_directory=$(escape "$target_directory")
+	filter="$filter
+		mkdir -p $safe_directory;
+		git mv -k * $safe_directory;
+	"
+	filter_kind="tree"
+else
+	filter_kind="index"
+fi
+#		files=()
+#		while IFS= read -r -d $'\0' file; do
+#			files+=(\"$file\")
+#		done < <(find . -type f -print0)
+
+header=$(tput rev);footer=$(tput sgr0)
+function message() {
+	args=("$@")
+	last=${args[-1]}
+	unset args[-1]
+	echo -n "$header" >&2 ;echo "${args[@]}" "$last$footer" >&2
+}
+
+function rmTag(){
+	if (( ! $keep )); then
+		message -n "Removing temporary tag $temp_tag... "
+		"$git" tag -d "$temp_tag" >/dev/null &&
+		message " Done"
+	fi
+}
+
+
+message "Fetching remote $remote_name/$remote_branch..."
+$git fetch $remote_name $remote_branch || exit $?
+
+message -n "Creating temporary reference for filtering: $temp_tag"
+$git tag $temp_tag refs/remotes/$remote_name/$remote_branch || exit $?
+temp_sha=$("$git" rev-parse --verify "refs/tags/$temp_tag") 
+local_sha=$("$git" rev-parse --verify "$local_branch")
+message "(SHA: $temp_sha)"
+
+trap rmTag EXIT
+
+message "Filtering remote repository to keep only folder: $subdir"
+$git filter-branch -f --prune-empty --$filter_kind-filter "$filter" "refs/tags/$temp_tag" || exit $?
+
+temp_rw_sha=$("$git" rev-parse --verify "refs/tags/$temp_tag")
+
+message "Tag rewritten: $temp_tag($temp_sha->$temp_rw_sha)"
+$git rebase ${interactive:+-i} --keep-empty --onto "$local_branch" "$local_branch" "refs/tags/$temp_tag" || exit $?
+
+if (( $update )); then  
+	message "Tag rewritten: $temp_tag($temp_sha->$temp_rw_sha)"
+	$git update-ref -m "pull-subdir (items: $items_safe) from $remote_name/$remote_branch" "refs/heads/$local_branch" HEAD
+	message "Fast Forward local branch."
+	$git checkout "$local_branch"
+fi

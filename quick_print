@@ -1,0 +1,34 @@
+#! /bin/bash
+
+    print="$1";
+    pages=$(pdfinfo "$print"  | sed -e '/Pages/s/[^ \t]\+\s\+//p;d')
+    echo Pages: $pages
+    outfile=$(mktemp);
+    if ! (( $pages /2 * 2 == $pages )); then
+        # temp=$(mktemp -u);
+        # gs -sDEVICE=pdfwrite -dNOPAUSE -dBATCH -dSAFER -dFirstPage=1 -dLastPage=$((pages-1)) -sOutputFile=$temp "$1";
+        # lpr -P green-pcl-gutenprint "$temp";
+        # gs -sDEVICE=pdfwrite -dNOPAUSE -dBATCH -dSAFER -dFirstPage=$pages -dLastPage=$pages -sOutputFile=$temp "$1";
+        # lpr -P green-pcl-gutenprint "$temp";
+	blank_svg=$(cat <<'EOF'
+<?xml version="1.0" encoding="UTF-8" standalone="no"?>
+<svg
+    xmlns="http://www.w3.org/2000/svg"
+    version="2.0"
+    viewBox="0 0 500 500"
+    width="500"
+    height="500"
+    id="Starter SVG">
+
+</svg>
+EOF
+)
+	blank_file=$(mktemp -u);
+	echo "$blank_svg" | inkscape --without-gui --file=/dev/stdin --export-pdf "$blank_file"
+	echo "Appending empty page $blank_file to odd-numbered document $outfile"
+        gs -sDEVICE=pdfwrite -dNOPAUSE -dBATCH -dSAFER -sOutputFile="$outfile" "$1" "$blank_file";
+        
+    else
+	cp "$print" "$outfile"
+    fi
+    lpr -P green-pcl-gutenprint -o Duplex=DuplexTumble "$outfile";
