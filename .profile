@@ -4,9 +4,9 @@
 escape () {
 	# escape text to be embeded in single quotes
 	if [ "${0##*/}" == "bash" ]; then
-		echo "${1//\'/\\\'}"
+		echo "${1//\'/\'\"\'\"\'}"
 	else
-		echo "$1"|sed -e "s/'/\\\'/g"
+		echo "$1"|sed -e "s/'/'\"'\"'/g"
 	fi
 }
 
@@ -28,7 +28,8 @@ pathappend () {
 
 	# Append to the clean PATH
 	newpath=${newpath+$newpath:}$1
-	eval "export $variable=\$newpath"
+	eval $variable=\$newpath
+	eval "export $variable"
 }
 
 pathprepend () {
@@ -49,7 +50,8 @@ pathprepend () {
 
 	# Prepend to the clean PATH
 	newpath=$1${newpath+:$newpath}
-	eval "export $variable=\$newpath"
+	eval $variable=\$newpath
+	eval "export $variable"
 }
 
 # Set up paths
@@ -72,7 +74,9 @@ fi
 
 pathappend $LOCAL_ROOT/usr/lib/java/"*" CLASSPATH
 
+unset pathappend pathprepend escape
+
 # Set up environments
 export MAIL="$HOME/Maildir"
 
-[ -r ~/.bashrc ] && source ~/.bashrc
+[ "${0##*/}" = "bash" ] && [ -r ~/.bashrc ] && source ~/.bashrc
