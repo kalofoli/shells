@@ -1,0 +1,146 @@
+#! /bin/bash
+
+
+function error() {
+    echo "$@" >&2
+    exit 1
+}
+
+function mesg() {
+    echo "$@" >&2
+}
+
+function getSocatAddress() {
+    addr=${1%%;*}
+    type=${addr%:*}
+    $opts=${addr##*:}
+    OFS=$IFS;IFS=',';PAIRS=($opt);IFS=$OFS
+    socatAddr=""
+    case $type in 
+        unix) mesg "Found unix address";
+            for ((i=0;i<${#PARTS[@]};i++)) ; do
+                part=${PARTS[$i]}
+                key=${part%%:*}
+                val=${part*:#}
+                case $key in
+                    abstract) socatAddr=ABSTRACT:$part; break;;
+                esac
+            done
+        *) error "DBUS address $addr is not implemented.";;
+    esac
+    if ! [ -z "$socatAddr" ]; error "Could not parse DBUS address"; fi
+    echo "$socatAddr"
+}
+
+function init() {
+    mkdir -p "$dirServers";
+}
+
+function set_client() {
+    user="$1"
+    mkdir -p "$dirServers/$user"
+    
+}
+
+function enable_user() {
+    user=$1
+    path=$2
+    setfacl -m user:$user:rx "$path"
+}
+
+function disable_user() {
+    user=$1
+    path=$2
+    setfacl -x user:$user "$path"
+}
+
+function server_start() {
+    dirUser=dirServer/$user
+    pathPid=dirServer/pid
+    pathSocket=dirServer/native
+    socat "UNIX-LISTEN:$pathSocket" "$addrSocat" &
+    res=$?
+    pid=$!
+    if [ "$res" -eq "0" ] ; then
+        echo $pid >"$pidFile"
+        enable_user $user "$dirUser"
+    else
+        error "Could not start dbus proxy."
+    fi
+}
+
+function server_running() {
+    user=$1
+    pathPid=dirServer/pid
+    $pid=$( cat "$pathPid" )
+    if ! [ -z "$pid" ] && ps -p "$pid" &>/dev/null
+        echo $pid
+    else
+        false
+    fi
+}
+
+function server_kill() {
+    user=$1
+    pid=$(server_running $user)
+    pathPid=dirServer/pid
+    if ! [ -z "$pid" ]
+        kill $pid && rm -f "$pathPid"
+    fi
+}
+
+
+# program constants                                                                                                                                                                                                                    
+tmpdir=/tmp/                                                                                                                                                                             
+dirCommon=/tmp/.dbus-link
+dirServers="$dirCommon/servers"
+# Settable params                                                                                                                                                                                                                      
+verbose=0
+mode=""
+userRemote=""
+address=auto
+
+opts="hu:a:"
+longopts="help,client,server,user,dbus-address"
+
+function usage() {
+echo -e "usage:
+\t$(basename $0) [options] [long-options] mode
+    Link the dbus servers of multiple users.
+    
+    Options:
+        -h|--help       Help message
+        -u|--user       Name of the other user.
+        -a|dbus-address Dbus address. Default: $address.
+    Mode can be server, client.
+"
+}
+
+ARGS="`getopt -n "$0" -l $longopts -o $opts -- "$@"`"
+if (( err=$? )); then echo -e $usage ; exit $err ; fi
+eval set -- $ARGS
+
+while true; do
+        case "$1" in
+        -h|--help) usage; exit 0;;
+        -u|--user) userRemote=$2;shift 2;;
+        -a|--dbus-address) address=$2;shift 2;;
+        --) shift; break;;
+        *) echo "INTERNAL OPTION ERROR: $1";exit 1 ;;
+        esac
+done
+
+mode=$1
+addressSocat=`getSocatAddress "$address"`
+
+userLocal=$USER
+
+case $mode in
+    start) start_server ;;
+    stop) server_kill ;;
+    remove) disable_user $user;;
+    add) enable_user $user;;
+    import) import $user;;
+    *) echo "Unknown mode $mode."; usage; exit 1;;
+esac
+
