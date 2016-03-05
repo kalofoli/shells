@@ -1,5 +1,8 @@
 #! /bin/bash
 
+# program constants                                                                                                                                                                                                                    
+tmpdir=/tmp/                                                                                                                                                                             
+dirCommon=/tmp/.dbus-link
 
 function error() {
     echo "$@" >&2
@@ -10,70 +13,115 @@ function mesg() {
     echo "$@" >&2
 }
 
-function getSocatAddress() {
+function parse_dbus_address() {
     addr=${1%%;*}
     type=${addr%:*}
-    $opts=${addr##*:}
-    OFS=$IFS;IFS=',';PAIRS=($opt);IFS=$OFS
-    socatAddr=""
+    opts=${addr##*:}
+    OFS=$IFS;IFS=',';PAIRS=($opts);IFS=$OFS
+    addrSocat=""
+#echo -e "PARSE:\naddr=$addr;ype=$type;opts=$opts" >&2
     case $type in 
         unix) mesg "Found unix address";
-            for ((i=0;i<${#PARTS[@]};i++)) ; do
-                part=${PARTS[$i]}
-                key=${part%%:*}
-                val=${part*:#}
+#echo "PARSE ITER0: # ${#PAIRS[*]}" >&2
+            for ((i=0;i<${#PAIRS[*]};i++)) ; do
+                pair=${PAIRS[$i]}
+                key=${pair%%=*}
+                val=${pair#*=}
+#echo -e "PARSE ITER:part=$pair;  key=$key;  va=$val" >&2
                 case $key in
-                    abstract) socatAddr=ABSTRACT:$part; break;;
+                    abstract) addrSocat=ABSTRACT:$val;;
+                    guid) guid=$val;;
                 esac
-            done
-        *) error "DBUS address $addr is not implemented.";;
+            done;;
+        *) error "DBus address $addr is not implemented.";;
     esac
-    if ! [ -z "$socatAddr" ]; error "Could not parse DBUS address"; fi
-    echo "$socatAddr"
+#echo -e "PARSE RES:guid=$guid; addrSocat=$addrSocat" >&2
+    if [ -z "$addrSocat" ]; then error "Could not parse DBus address"; fi
+    echo "$addrSocat"
 }
 
-function init() {
-    mkdir -p "$dirServers";
+function init_servers() {
+    if [ -z "$initok" ] ; then 
+        parse_dbus_address "$addrDBus" # sets addrSocat, guid
+        
+        dirUser="$dirCommon/$USER"
+        dirServer="$dirUser/$guid"
+        
+        pathPid="$dirServer/pid"
+        pathSocket="$dirServer/native"
+        
+        if ! [ -d "$dirCommon" ]; then 
+            if mkdir -p "$dirCommon"; then
+                chmod 777 "$dirCommon" && mesg "Created common run-time directory '$dirCommon'."
+            else error "Unable to create common run-time directory."; exit 1; fi
+        fi
+        
+        if ! [ -d "$dirUser" ]; then 
+            if mkdir -p "$dirUser"; then 
+                chmod 700 "$dirUser" && mesg "Created user run-time directory '$dirUser'."
+            else error "Unable to create user run-time directory."; exit 1; fi
+        fi
+        
+        if ! [ -d "$dirServer" ]; then 
+            if mkdir -p "$dirServer"; then 
+                chmod 700 "$dirServer" && mesg "Created server run-time directory '$dirServer'."
+            else error "Unable to create server run-time directory."; exit 1; fi
+        fi
+        
+        initok="yes"
+    fi
+echo -e "INIT: pathPid='$pathPid'; pathSocket='$pathSocket' addrSocat='$addrSocat'" >&2
 }
 
-function set_client() {
-    user="$1"
-    mkdir -p "$dirServers/$user"
-    
-}
 
 function enable_user() {
     user=$1
-    path=$2
-    setfacl -m user:$user:rx "$path"
+    init_servers
+    mesg "Allowing access for user '"$user"' to server of user '$USER' with guid '$guid'"
+    setfacl -m user:$user:rx  "$dirUser" "$dirServer"
+    setfacl -m user:$user:r   "$pathPid"
+    setfacl -m user:$user:rwx "$pathSocket"
 }
 
 function disable_user() {
     user=$1
-    path=$2
-    setfacl -x user:$user "$path"
-}
-
-function server_start() {
-    dirUser=dirServer/$user
-    pathPid=dirServer/pid
-    pathSocket=dirServer/native
-    socat "UNIX-LISTEN:$pathSocket" "$addrSocat" &
-    res=$?
-    pid=$!
-    if [ "$res" -eq "0" ] ; then
-        echo $pid >"$pidFile"
-        enable_user $user "$dirUser"
-    else
-        error "Could not start dbus proxy."
+    init_servers
+    mesg "Disallowing access for user "$user" to server of user '$USER' with guid '$guid'"
+    setfacl -x user:$user "$dirServer" "$pathSocket" "$pathPid"
+    if ! getfacl -Rsc "dirUser/"*  2>&1 | grep "$dirUser" >/dev/null ; then 
+        mesg "Disallowing access for user '$user' to the proxy states of user '$USER'."
+        setfacl -x user:$user "$dirUser"
     fi
 }
 
+function wait_socket() {
+    time0=$(date +%s)
+    if ! [ -e "$pathSocket" ]; then 
+        mesg -n "Waiting for socket '$pathSocket' to appear "
+        while [ $(( $(date +%s)-$time0 )) -lt $timeout ]; do
+            sleep $timeStep
+            mesg -n "."
+            if [ -e "$pathSocket" ] ; then mesg " Done"; return 0; fi;
+        done
+        error " Timeout"
+    fi
+}
+
+function server_start() {
+    init_servers
+    mesg "Starting DBus proxy targeting DBus server with guid '$guid'."
+    
+    if [ -e "$pathSocket" ] ; then error "Socket already exists. Stop rnning server first or clean files manually. " ; fi
+    ( umask 077; sleep 2; exec socat "UNIX-LISTEN:$pathSocket" "$addrSocat"; ) &
+    pid=$!
+    wait_socket
+    echo $pid >"$pathPid"
+}
+
 function server_running() {
-    user=$1
-    pathPid=dirServer/pid
-    $pid=$( cat "$pathPid" )
-    if ! [ -z "$pid" ] && ps -p "$pid" &>/dev/null
+    init_servers
+    pid=$( cat "$pathPid" )
+    if ! [ -z "$pid" ] && ps -p "$pid" &>/dev/null; then
         echo $pid
     else
         false
@@ -81,27 +129,69 @@ function server_running() {
 }
 
 function server_kill() {
-    user=$1
+    init_servers
     pid=$(server_running $user)
-    pathPid=dirServer/pid
-    if ! [ -z "$pid" ]
-        kill $pid && rm -f "$pathPid"
+    if ! [ -z "$pid" ]; then
+        mesg "Stopping proxy with pid '$pid'"
+        kill $pid || error "Failed to kill proxy server with pid $pid."
+    fi
+    mesg "Removing proxy server with guid $guid"
+    rm -f -- "$pathPid" && rmdir -- "$dirServer"
+}
+
+function init_clients() {
+    dirUser="$dirCommon/$userRemote"
+    if [ ! -z "$guid" ] ; then 
+        dirServer="$dirUser/$guid"
+    
+        pathSocket="$dirServer/native"
+        pathPid="$dirServer/pid"
+        if [ -e "$pathPid" ]; then pid=$( cat "$pathPid" ); fi
+        addrDBus="unix:path=$pathSocket,guid=$guid"
     fi
 }
 
 
-# program constants                                                                                                                                                                                                                    
-tmpdir=/tmp/                                                                                                                                                                             
-dirCommon=/tmp/.dbus-link
-dirServers="$dirCommon/servers"
+function list() {
+    init_clients
+    guids=( $(ls "$dirUser") )
+    echo "ID   PID  STAT GUID                                  ADDRESS"
+    for ((i=0;i<${#guids[@]};i++)); do 
+        (
+            guid=${guids[i]}
+            init_clients
+            if ! [ -z "$pid" ] ; then 
+                pidStat=$(ps -p $pid -o s --no-headers 2>/dev/null)
+            fi
+            pidStat=${pidStat:-?}
+            pid=${pid:-?}
+            printf "%2d %6s %2s   %32s %s\n" $i $pid $pidStat $guid $addrDBus
+        )
+    done
+}    
+    
+function import() {
+    init_clients
+    if [ "$guid" -eq "$guid" ] 2>/dev/null ; then 
+        guids=($(ls "$dirUser") ) || error "Cannot list GUIDS of user '$userRemote'".
+        guid=${guids[$guid]}
+        init_clients
+    fi
+    echo "export DBUS_SESSION_BUS_ADDRESS=$addrDBus"
+}
+
+
 # Settable params                                                                                                                                                                                                                      
 verbose=0
 mode=""
 userRemote=""
-address=auto
+timeout=10
+timeStep=0.1
+addrDBus=$DBUS_SESSION_BUS_ADDRESS
+guid=0
 
-opts="hu:a:"
-longopts="help,client,server,user,dbus-address"
+opts="hu:a:g:"
+longopts="help,client,server,user,dbus-address,guid"
 
 function usage() {
 echo -e "usage:
@@ -109,10 +199,18 @@ echo -e "usage:
     Link the dbus servers of multiple users.
     
     Options:
-        -h|--help       Help message
-        -u|--user       Name of the other user.
-        -a|dbus-address Dbus address. Default: $address.
-    Mode can be server, client.
+        -h|--help         Help message
+        -u|--user         Name of the other user.
+        -a|--dbus-address Dbus address. Default: $address.
+        -g|--guid         GUID of the server, or an index within the list of guids. Default: $guid.
+        -t|--timeout      Socket appearance timeout. Default: $timeout.
+    Mode can be:
+        start    Start the server
+        stop     Stop the server
+        remove   Remove access to specified user to server of the calling user
+        add      Add access to the specified user to the server of the calling user
+        list     List all available servers for calling user that the specified user allows.
+        import   Print the configuratio enironment variable that enables using the proxy server.
 "
 }
 
@@ -124,23 +222,22 @@ while true; do
         case "$1" in
         -h|--help) usage; exit 0;;
         -u|--user) userRemote=$2;shift 2;;
-        -a|--dbus-address) address=$2;shift 2;;
+        -a|--dbus-address) addrDBus=$2;shift 2;;
+        -g|--guid) guid=$2; shift 2;;
         --) shift; break;;
         *) echo "INTERNAL OPTION ERROR: $1";exit 1 ;;
         esac
 done
 
 mode=$1
-addressSocat=`getSocatAddress "$address"`
-
-userLocal=$USER
 
 case $mode in
-    start) start_server ;;
-    stop) server_kill ;;
-    remove) disable_user $user;;
-    add) enable_user $user;;
-    import) import $user;;
+    start) server_start;;
+    stop) server_kill;;
+    remove) disable_user $userRemote;;
+    add) enable_user $userRemote;;
+    list) list;;
+    import) import;;
     *) echo "Unknown mode $mode."; usage; exit 1;;
 esac
 
