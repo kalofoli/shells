@@ -21,7 +21,7 @@ function parse_dbus_address() {
     addrSocat=""
 #echo -e "PARSE:\naddr=$addr;ype=$type;opts=$opts" >&2
     case $type in 
-        unix) mesg "Found unix address";
+        unix)
 #echo "PARSE ITER0: # ${#PAIRS[*]}" >&2
             for ((i=0;i<${#PAIRS[*]};i++)) ; do
                 pair=${PAIRS[$i]}
@@ -37,7 +37,6 @@ function parse_dbus_address() {
     esac
 #echo -e "PARSE RES:guid=$guid; addrSocat=$addrSocat" >&2
     if [ -z "$addrSocat" ]; then error "Could not parse DBus address"; fi
-    echo "$addrSocat"
 }
 
 function init_servers() {
@@ -50,29 +49,31 @@ function init_servers() {
         pathPid="$dirServer/pid"
         pathSocket="$dirServer/native"
         
-        if ! [ -d "$dirCommon" ]; then 
-            if mkdir -p "$dirCommon"; then
-                chmod 777 "$dirCommon" && mesg "Created common run-time directory '$dirCommon'."
-            else error "Unable to create common run-time directory."; exit 1; fi
-        fi
-        
-        if ! [ -d "$dirUser" ]; then 
-            if mkdir -p "$dirUser"; then 
-                chmod 700 "$dirUser" && mesg "Created user run-time directory '$dirUser'."
-            else error "Unable to create user run-time directory."; exit 1; fi
-        fi
-        
-        if ! [ -d "$dirServer" ]; then 
-            if mkdir -p "$dirServer"; then 
-                chmod 700 "$dirServer" && mesg "Created server run-time directory '$dirServer'."
-            else error "Unable to create server run-time directory."; exit 1; fi
-        fi
-        
         initok="yes"
     fi
-echo -e "INIT: pathPid='$pathPid'; pathSocket='$pathSocket' addrSocat='$addrSocat'" >&2
+#echo -e "INIT: pathPid='$pathPid'; pathSocket='$pathSocket' addrSocat='$addrSocat'" >&2
 }
 
+function create_server_folders() {
+    init_servers
+    if ! [ -d "$dirCommon" ]; then 
+        if mkdir -p "$dirCommon"; then
+            chmod 777 "$dirCommon" && mesg "Created common run-time directory '$dirCommon'."
+        else error "Unable to create common run-time directory."; exit 1; fi
+    fi
+    
+    if ! [ -d "$dirUser" ]; then 
+        if mkdir -p "$dirUser"; then 
+            chmod 700 "$dirUser" && mesg "Created user run-time directory '$dirUser'."
+        else error "Unable to create user run-time directory."; exit 1; fi
+    fi
+    
+    if ! [ -d "$dirServer" ]; then 
+        if mkdir -p "$dirServer"; then 
+            chmod 700 "$dirServer" && mesg "Created server run-time directory '$dirServer'."
+        else error "Unable to create server run-time directory."; exit 1; fi
+    fi
+}
 
 function enable_user() {
     user=$1
@@ -109,10 +110,11 @@ function wait_socket() {
 
 function server_start() {
     init_servers
+    create_server_folders
     mesg "Starting DBus proxy targeting DBus server with guid '$guid'."
     
     if [ -e "$pathSocket" ] ; then error "Socket already exists. Stop rnning server first or clean files manually. " ; fi
-    ( umask 077; sleep 2; exec socat "UNIX-LISTEN:$pathSocket" "$addrSocat"; ) &
+    ( umask 077; exec socat "UNIX-LISTEN:$pathSocket,fork" "$addrSocat"; ) &
     pid=$!
     wait_socket
     echo $pid >"$pathPid"
@@ -120,7 +122,7 @@ function server_start() {
 
 function server_running() {
     init_servers
-    pid=$( cat "$pathPid" )
+    pid=$( cat "$pathPid" 2>/dev/null )
     if ! [ -z "$pid" ] && ps -p "$pid" &>/dev/null; then
         echo $pid
     else
@@ -135,8 +137,10 @@ function server_kill() {
         mesg "Stopping proxy with pid '$pid'"
         kill $pid || error "Failed to kill proxy server with pid $pid."
     fi
-    mesg "Removing proxy server with guid $guid"
-    rm -f -- "$pathPid" && rmdir -- "$dirServer"
+    if [ -d "$dirServer" ] ; then 
+        mesg "Removing proxy server with guid $guid"
+        rm -f -- "$pathPid" && rmdir -- "$dirServer"
+    fi
 }
 
 function init_clients() {
@@ -165,7 +169,7 @@ function list() {
             fi
             pidStat=${pidStat:-?}
             pid=${pid:-?}
-            printf "%2d %6s %2s   %32s %s\n" $i $pid $pidStat $guid $addrDBus
+            printf "%2d %6s %2s   %32s %s\n" "$i" "$pid" "$pidStat" "$guid" "$addrDBus"
         )
     done
 }    

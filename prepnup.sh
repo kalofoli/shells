@@ -5,22 +5,25 @@ tmpdir=/tmp/
 # Settable params
 unlink=1;
 log=''
-nup=2
+nup=2x1
+jobs=4
 paperx=595
 papery=842
 marginx=18
 marginy=$( echo "$marginx * $papery / $paperx" | bc -l)
 offsetx=10
-offsety=4
+offsety=1
 debug=0
 verbose=0
 dry=0
-nproc=10
+nocrop=0
+nproc=4
 gs=gs
+pbmpsize=$(( 1024*1024 ))
 dirout=''
 
-opts="hl:n:dvp:D:"
-longopts="help,nproc:,paper-y:,paper-x:,margin-y:,dir:,margin-x:,dry,offset-x:,offset-y:,debug,verbose,nup:,unlink,log:"
+opts="hl:n:j:dvp:D:C"
+longopts="help,nproc:,paper-y:,paper-x:,margin-y:,dir:,margin-x:,dry,offset-x:,offset-y:,debug,verbose,nup:,jobs:,unlink,log:,no-crop"
 usage="usage:
 \t$(basename $0) [options] [long-options] [--] files\n
  	-h|--help       Help message\n
@@ -31,8 +34,10 @@ usage="usage:
  	--offset-y   Y  bottom offset (Default: $offsety).\n
  	--offset-x   X  left offset (Default: $offsetx).\n
  	--dry           Toggle dry-run (Default: $dry).\n
+ 	-C|--no-cpop C  No crop. (Default: $nocrop).\n
  	-D|--dir     D  Save resulting files to folder D. Set to '' to save in-place. (Default: $dry).\n
- 	-n|--nup     N  Number of pages per side (Defaulf: $nup).\n
+ 	-n|--nup     N  Number of pages per side CxR (Defaulf: $nup).\n
+ 	-j|--jobs    N  Number of processor cores to use (Defaulf: $jobs).\n
  	-u|--unlink     Toggle unlink temporary files (Default: $unlink)\n
  	-l|--log     F  Use F as a log file, '' for none. (Default: $log)\n
  	-d|--debug      Toggle debugging. (Default: $debug)\n
@@ -50,6 +55,8 @@ while true; do
 	-d|--debug) debug=$((!$debug));shift;;
 	-v|--verbose) verbose=$((!$verbose));shift;;
 	-n|--nup) nup="$2";shift 2;;
+	-j|--jobs) jobs="$2";shift 2;;
+	-C|--no-crop) nocrop=$((! $nocrop));shift 1;;
 	-D|--dir) dirout="$2";shift 2;;
 	--dry) dry=$((! $dry));shift;;
 	--offset-y) offsety="$2";shift 2;;
@@ -70,15 +77,18 @@ Parameters used:
 unlink="$unlink"
 log="$log"
 nup="$nup"
+jobs="$jobs"
 paperx="$paperx"
 papery="$papery"
 marginx="$marginx"
 marginy="$marginy"
 offsetx="$offsetx"
 offsety="$offsety"
+pbmpsize="$pbmpsize"
 debug="$debug"
 verbose="$verbose"
 dry="$dry"
+nocrop="$nocrop"
 dirout="$dirout"
 nproc="$nproc"
 gs="$gs"
@@ -106,6 +116,8 @@ function gscall () {
 		-sDEVICE=pdfwrite \
 		-dSAFER \
 		-dCompatibilityLevel="1.3" \
+		-dNumRenderingThreads="$jobs" \
+		-dMaxPatternBitmap="$pbmpsize" \
 		-dPDFSETTINGS="/printer" \
 		-dSubsetFonts=true \
 		-dEmbedAllFonts=true \
@@ -135,9 +147,13 @@ function prepare() {
 	tempnc=`mktemp -u -d "${tmpdir}tmp.$input_base.nup-centXXX.pdf"`
 	if [ -z "$dirout" ]; then dir="$input_dir"; else dir="$dirout";fi
 	out="$dir/nup-$input_base"
-	invoke pdfcrop $verb_crop --margin '5 0' "$1" "$tempc" &&
+	if (( $nocrop )); then 
+		cp "$1" "$tempc"
+	else
+		invoke pdfcrop $verb_crop --margin '5 0' "$1" "$tempc" 
+	fi
 	pdfcenter "$tempc" "$tempcc" &&
-	invoke pdfnup --nup $nup "$tempcc" -o "$tempn" &&
+	invoke pdfxup -x "${nup%x*}" -y "${nup#*x}" -o "$tempn" "$tempcc" &&
 	pdfcenter "$tempn" "$tempnc" &&
 	pdfmargin "$tempnc" "$out"
 	status=$?
