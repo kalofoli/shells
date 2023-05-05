@@ -1,0 +1,136 @@
+#! /bin/bash
+
+procs=1
+movie=movie
+overwrite=0
+cont=1
+quiet=0
+comp=1
+function usage() {
+    bool=( True False )
+    cat << EOF
+Usage: $0 [-n NAME] [ -p PROCS ] [-hOqcC] URL
+Downloads the pieces of a transport stream media url and then stitches them into a file.
+
+Arguments:
+    -p PROCS    Number of parallel downloaders to run. Typically, higher numbers
+                (up to a point) help saturate the available connection bandwidth
+                leading to a faster download (Default: $procs).
+    -n NAME     Movie name (Default: $movie).
+                Note: This its the filesystem prefix for derived paths.
+                That means that you can use a valid path prefix, which will be
+                used for the cached transport stream files and the final movie.
+    -O          Toggle re-downloading existing files. (Default: ${bool[$overwrite]}).
+                If enabled, any already existing files will also be downloaded.
+    -c          Toggle continue existing files. (Default: ${bool[$cont]}).
+                If enabled, any already existing files will be appended at.
+                This is useful when a previous invocation was terminated prematurely, possibly leaving some chunks incomplete.
+    -q          Toggle quiet mode (Default: ${bool[$quiet]}).
+    -C          Toggle perform complete step (Default: ${bool[$comp]}).
+                If enabled, This step is performed once all chunks are downloaded
+                to potentially complete any incomplete parts.
+EOF
+}
+
+while getopts ":n:p:hOcqC" opt; do
+    case "$opt" in
+        h)  usage; exit 0;;
+        p)  procs=$OPTARG;;
+        n)  movie=$OPTARG;;
+        O)  overwrite=$((1-overwrite));;
+        q)  quiet=$((1-quiet));;
+        c)  cont=$((1-cont));;
+        C)  comp=$((1-comp));;
+        *)  echo "Unknown option $OPTARG." >&2
+            usage >&2
+            exit 1
+            ;;
+    esac
+done
+shift $((OPTIND-1))
+url=$1
+
+function message() {
+    if ! [ $quiet -eq 1 ]; then echo "$@" >&2 ; fi
+}
+
+function error() {
+    echo "$@" >&2; exit 1
+}
+
+function getter() {
+    params=( )
+    [ $overwrite -eq 1 ] && params=( "${params[@]}" -c )
+    cd "$movie" ;
+    ( while read each; do echo "$url_base/$each"; done ) | \
+    wget -i /dev/stdin "${params[@]}" "$@" -o $$-$p.log 
+}
+
+if [ -z "$url" ]; then error "Missing URL"; fi
+
+url_base=$(dirname "$url")
+
+! [ -d "$movie" ] && mkdir "$movie"
+index="$movie/index.m3u8"
+message -n "Fetching index..."
+echo "index.m3u8" | getter
+[ -e "$index" ] || error Failed to download index file. See log files.
+message "Done"
+
+OFS=$IFS;IFS=$'\n';files_all=( $(cat "$index" | sed -e '/^\s*#/d;/^$/d' ) );IFS=$OFS
+
+OFS=$IFS;IFS=$'\n';files=(
+    $(
+        for ((i=0;i<${#files_all[@]};i++)); do
+            each=${files_all[$i]};
+            [ -e "$movie/$each" ] || echo "$each";
+        done
+    )
+);IFS=$OFS
+
+message -e "Transport stream chunks in URL:\n\tTotal:\t${#files_all[@]}\n\tLeft: \t${#files[@]}"
+
+if [ $overwrite -eq 1 ]; then
+    message Re-downloading existing files.
+    files=( "${files_all[@]}" )
+fi
+    
+echo -n Downloading ${#files[@]} files in $procs processes...
+pids=()
+for ((p=0;p<procs;p++)); do
+	( for ((i=${#files[@]}/$procs*$p;i<${#files[@]}/$procs*($p+1);i++)); do
+		echo "${files[$i]}";
+	done ) | getter &
+	pids=( "${pids[@]}" $! )
+done
+# Download the remainder, if any
+( for ((i=${#files[@]}/$procs*$procs;i<${#files[@]};i++)); do
+	echo "${files[$i]}";
+done ) | getter &
+pids=( "${pids[@]}" $! )
+( # Progress:
+    cd "$movie";echo >&2
+    while sleep 5; do 
+        num_ok=0
+        for ((i=0;i<${#files[@]};i++)); do
+            [ -e "${files[$i]}" ] && num_ok=$((num_ok+1))
+        done
+        printf "\r%3d%% Completed (%4d/%d)" $(( ($num_ok*100)/${#files[@]})) $num_ok ${#files[@]} >&2
+    done
+) &
+pid_p=$!
+trap "pkill -P $$" EXIT # Kill all downloaders if interrupted
+wait ${pids[@]}
+kill $pid_p
+trap EXIT
+message -e "\nDone"
+
+
+if [ $comp -eq 1 ]; then 
+    message -n "Completing mode: re-downloading all files in completion mode... "
+    printf "%s\n" "${files_all[@]}" | getter -c
+    message Done
+fi
+
+message "Combining all files into '$movie.mp4'"
+ffmpeg -i "$index" -acodec copy -vcodec copy "$movie.mp4"
